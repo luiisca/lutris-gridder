@@ -10,3 +10,5 @@ build/
 *.egg-info/
 .env
 EOF
+src/learning.py
+src/imgs
