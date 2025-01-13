@@ -298,7 +298,6 @@ class CoverArtDownloader:
                 cover_file.write_bytes(response.content)
 
                 # Transform the aspect ratio
-                # TODO: avoid transfomation when img aspect ratio is good enough
                 if crop_to_fit:
                     ImageProcessor.crop_to_fit(
                     cover_file, target_dimensions)
