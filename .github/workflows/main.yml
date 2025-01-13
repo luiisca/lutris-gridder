@@ -21,8 +21,7 @@ jobs:
         with:
           token: ${{ secrets.PAT }}
           target-branch: main
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
+          release-type: simple
   build:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
