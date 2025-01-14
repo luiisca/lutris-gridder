@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/luiisca/lutris-gridder/compare/v1.0.0...v1.1.0) (2025-01-14)
+
+
+### Features
+
+* add img selector ([6c254ce](https://github.com/luiisca/lutris-gridder/commit/6c254ce2cb7cbee91b158882760a379f934c9098))
+
 ## 1.0.0 (2025-01-13)
 
 
