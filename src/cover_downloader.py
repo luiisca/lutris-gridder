@@ -7,24 +7,35 @@ A tool to download and transform cover art from SteamGridDB for Lutris games.
 import sys
 import logging
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Literal, Optional, List, Tuple
 import requests
 import sqlite3
 from PIL import Image
 from pathlib import Path
 import json
 import inquirer
+import tempfile
+from rich.console import Console
+from rich_pixels import Pixels
 
 # Configuration
-
-
 @dataclass
 class Config:
-    BANNER_DIMENSIONS: Tuple[int, int] = (574, 215)  # 8:3 ratio
-    COVER_DIMENSIONS: Tuple[int, int] = (675, 900)   # 3:4 ratio
+    class BANNER:
+        dimensions: Tuple[int, int] = (574, 215) # 8:3 ratio
+        api_dimensions: str = "460x215"
+        path: Path = Path.home() / ".cache/lutris/banners"
+    class COVER:
+        dimensions: Tuple[int, int] = (675, 900) # 3:4 ratio
+        api_dimensions: str = "600x900"
+        path: Path = Path.home() / ".cache/lutris/coverart"
     API_BASE_URL: str = "https://www.steamgriddb.com/api/v2"
     CONFIG_DIR: Path = Path.home() / ".config" / "lutris-gridder"
     API_KEY_FILE: Path = CONFIG_DIR / "api_key.json"
+    TYPE: Literal["banner", "cover"] = "banner"
+    CROP_TO_FIT: bool = True
+    MODE: Literal["auto", "manual"] = "auto"
+    REPLACE_ALL: bool = False
 
 
 class ImageProcessor:
@@ -85,6 +96,55 @@ class ImageProcessor:
             logging.error(f"Failed to process image {image_path}: {str(e)}")
             raise
 
+    @staticmethod
+    def display_terminal_preview(image_url: str, max_height: int = 20) -> None:
+        """Display an image preview in the terminal."""
+        try:
+            # Download image
+            response = requests.get(image_url)
+            response.raise_for_status()
+            
+            # Create temporary file for the image
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+                tmp_file.write(response.content)
+                tmp_path = tmp_file.name
+            
+                # Create console instance
+                console = Console()
+                
+                # Calculate terminal dimensions
+                terminal_width = console.width
+                preview_height = min(50, console.height - 5)
+
+                if Config.TYPE == 'cover' and Config.CROP_TO_FIT:
+                    ImageProcessor.crop_to_fit(Path(tmp_path))
+
+                # Open and resize the image with Pillow
+                with Image.open(tmp_path) as img:
+                    if Config.TYPE == 'banner' or not Config.CROP_TO_FIT:
+                        # Convert to RGB if image is in RGBA
+                        img = img.convert('RGB')
+                    # Calculate new dimensions while preserving aspect ratio
+                    aspect_ratio = img.width / img.height
+                    new_width = min(terminal_width, img.width)
+                    new_height = int(new_width / aspect_ratio)
+                    if new_height > preview_height:
+                        new_height = preview_height
+                        new_width = int(new_height * aspect_ratio)
+                    resized_img = img.resize((new_width, new_height))
+
+                    # Save to a temporary file if needed for rich_pixels
+                    resized_img.save(tmp_path)
+
+                # Display the resized image using rich_pixels
+                console.print(Pixels.from_image_path(tmp_path))
+                    
+                # Clean up temporary file
+                Path(tmp_path).unlink()
+            
+        except Exception as e:
+            logging.error(f"Failed to display preview: {str(e)}")
+
 
 class SteamGridDBAPI:
     """Handles all API interactions with SteamGridDB."""
@@ -94,7 +154,7 @@ class SteamGridDBAPI:
         self.base_url = Config.API_BASE_URL
 
     def search_games(self, game_names: List[str]):
-        """Search for a list of game names and return the first found game ID."""
+        """Search for a list of game names and return all found games."""
         if not game_names:
             return None
 
@@ -107,35 +167,30 @@ class SteamGridDBAPI:
             response.raise_for_status()
             data = response.json()
             if data.get("data"):
-                if games := data["data"]:
-                    return games
-                else:
-                    logging.warning(f"No results found for game: {game_name}")
-                    return self.search_games(game_names[1:])
+                return data["data"]
+            else:
+                logging.warning(f"No results found for game: {game_name}")
+                return self.search_games(game_names[1:])
         except requests.exceptions.RequestException as e:
             logging.error(f"API request failed: {str(e)}")
             return self.search_games(game_names[1:])
 
-    def get_cover_url(self, games: List, dimension_str: str) -> Optional[str]:
-        """Get the cover URL for a specific game."""
+    def get_all_covers(self, games: List[dict], dimension_str: str) -> List[dict]:
+        """Get all available covers for a specific game."""
         try:
             response = requests.get(
-                # TODO: may wanna come back to dimensions={dimensions}
-                f"{self.base_url}/grids/game/{
-                    games[0]["id"]}?dimensions={dimension_str}",
+                f"{self.base_url}/grids/game/{games[0]['id']}?dimensions={dimension_str}",
                 headers=self.auth_headers
             )
             response.raise_for_status()
             data = response.json()
-
-            if not data.get("data"):
-                return self.get_cover_url(games[1:], dimension_str)
-
-            return data["data"][0]["url"]
-
+            if data.get("data"):
+                return data["data"]
+            else:
+                return self.get_all_covers(games[1:], dimension_str)
         except requests.exceptions.RequestException as e:
-            logging.error(f"Failed to get cover URL: {str(e)}")
-            return self.get_cover_url(games[1:], dimension_str)
+            logging.error(f"Failed to get covers: {str(e)}")
+            return []
 
 
 class LutrisDB:
@@ -159,6 +214,116 @@ class LutrisDB:
         except sqlite3.Error as e:
             logging.error(f"Database error: {str(e)}")
             raise
+
+
+class Prompter:
+    """Handles user input and output."""
+    @staticmethod
+    def cover_type():
+        """Prompt user for cover type and return relevant information."""
+        questions = [
+            inquirer.List('type',
+                          message="Select cover art type:",
+                          choices=[
+                              'Banner (460x215)',
+                              'Vertical (600x900)'
+                          ],
+                          ),
+        ]
+
+        answer = inquirer.prompt(questions)["type"]
+
+        if "Banner" in answer:
+            Config.TYPE = "banner"
+        else:
+            Config.TYPE = "cover"
+
+    @staticmethod
+    def crop_to_fit():
+        """Prompt user for cover type and return relevant information."""
+        questions = [
+            inquirer.List('type',
+                          message="Crop images to fit?",
+                          choices=[
+                              'Yes',
+                              'No'
+                          ],
+                          ),
+        ]
+
+        answer = inquirer.prompt(questions)["type"]
+
+        if "Yes" in answer:
+            Config.CROP_TO_FIT = True
+        else:
+            Config.CROP_TO_FIT = False
+
+    @staticmethod
+    def selection_mode():
+        """Prompt user for selection mode and return relevant information."""
+        questions = [
+            inquirer.List('mode',
+                         message="Select cover art download mode:",
+                         choices=[
+                             'Auto (use first available cover)',
+                             'Manual (choose from available covers)'
+                         ],
+                         ),
+        ]
+        mode = inquirer.prompt(questions)["mode"]
+        if "Auto" in mode:
+            Config.MODE = "auto"
+        else:
+            Config.MODE = "manual"
+    
+    @staticmethod
+    def replace_all():
+        """Prompt user for replace all mode."""
+        questions = [
+            inquirer.List('mode',
+                         message="Replace all existing covers?",
+                         choices=[
+                             'Yes',
+                             'No'
+                         ],
+                         ),
+        ]
+        mode = inquirer.prompt(questions)["mode"]
+        if "Yes" in mode:
+            Config.REPLACE_ALL = True
+        else:
+            Config.REPLACE_ALL = False
+
+    @staticmethod
+    def cover_selection(covers: List[dict], game_name: str) -> Optional[str]:
+        """Prompt user to select from available covers."""
+        if not covers:
+            return None
+
+        print(f"\nAvailable covers for {game_name}:")
+        choices = []
+        
+        console = Console()
+        
+        for i, cover in enumerate(covers):
+            if i >= 5:
+                break
+            console.print(f"\n[bold cyan]Option {i + 1}:[/bold cyan]")
+            ImageProcessor.display_terminal_preview(cover['url'])
+            print(f"URL: {cover['url']}")
+            choices.append((f"Option {i + 1}", cover['url']))
+        
+        choices.append(("Skip this game", None))
+        
+        questions = [
+            inquirer.List('cover',
+                         message="Select cover art:",
+                         choices=[choice[0] for choice in choices],
+                         ),
+        ]
+        
+        answer = inquirer.prompt(questions)["cover"]
+        return dict(choices)[answer]
 
 
 class CoverArtDownloader:
@@ -192,51 +357,6 @@ class CoverArtDownloader:
         """Save configuration to file."""
         Config.API_KEY_FILE.write_text(json.dumps(config, indent=2))
 
-    def _get_cover_type(self) -> Tuple[str, Path, Tuple[int, int]]:
-        """Prompt user for cover type and return relevant information."""
-        questions = [
-            inquirer.List('type',
-                          message="Select cover art type:",
-                          choices=[
-                              'Banner (460x215)',
-                              'Vertical (600x900)'
-                          ],
-                          ),
-        ]
-
-        answer = inquirer.prompt(questions)["type"]
-
-        if "Banner" in answer:
-            return (
-                "460x215",
-                Path.home() / ".cache/lutris/banners",
-                Config.BANNER_DIMENSIONS
-            )
-        else:
-            return (
-                "600x900",
-                Path.home() / ".cache/lutris/coverart",
-                Config.COVER_DIMENSIONS
-            )
-    def _get_crop_to_fit(self) -> bool:
-        """Prompt user for cover type and return relevant information."""
-        questions = [
-            inquirer.List('type',
-                          message="Crop images to fit?",
-                          choices=[
-                              'Yes',
-                              'No'
-                          ],
-                          ),
-        ]
-
-        answer = inquirer.prompt(questions)["type"]
-
-        if "Yes" in answer:
-            return True
-        else:
-            return False
-
     def setup_api_key(self) -> None:
         """Set up the API key interactively. Store API key in the config file."""
         print("\nYou need a SteamGridDB API key to use this script.")
@@ -260,36 +380,46 @@ class CoverArtDownloader:
 
     def process_games(self):
         """Main method to process all games and download/transform cover art."""
-        dimension_str, cover_path, target_dimensions = self._get_cover_type()
-        crop_to_fit = False
-        if target_dimensions == Config.COVER_DIMENSIONS:
-            crop_to_fit = self._get_crop_to_fit()
+        Prompter.cover_type()
+        if Config.TYPE == "cover":
+            Prompter.crop_to_fit()
+        Prompter.selection_mode()
+        Prompter.replace_all()
 
-        cover_path.mkdir(parents=True, exist_ok=True)
-
+        config = Config.COVER if Config.TYPE == "cover" else Config.BANNER
+        config.path.mkdir(parents=True, exist_ok=True)
         games = self.lutris_db.get_all_games()
         total_games = len(games)
 
         print(f"\nProcessing {total_games} games...")
 
         for index, (game_name, game_slug) in enumerate(games, 1):
-            cover_file = cover_path / f"{game_slug}.jpg"
+            cover_file = config.path / f"{game_slug}.jpg"
 
-            if cover_file.exists():
+            if cover_file.exists() and Config.REPLACE_ALL is False:
                 print(f"[{index}/{total_games}] Cover exists for: {game_name}")
                 continue
 
-            print(f"[{index}/{total_games}] Processing: {game_name}")
+            print(f"[{index}/{total_games}] Processing: {game_name}, {game_slug}")
 
-            games = self.api.search_games([game_name, game_slug])
-            if not games:
+            found_games = self.api.search_games([game_name, game_slug])
+            if not found_games:
                 continue
 
-            cover_url = self.api.get_cover_url(games, dimension_str)
-            if not cover_url:
+            covers = self.api.get_all_covers(found_games, config.api_dimensions)
+            if not covers:
                 continue
 
             try:
+                cover_url = None
+                if Config.MODE == "manual":
+                    cover_url = Prompter.cover_selection(covers, game_name)
+                    if not cover_url:
+                        print(f"Skipping {game_name}")
+                        continue
+                else:
+                    cover_url = covers[0]['url']
+
                 # Download the cover
                 response = requests.get(cover_url)
                 response.raise_for_status()
@@ -297,12 +427,11 @@ class CoverArtDownloader:
                 # Save the original
                 cover_file.write_bytes(response.content)
 
-                # Transform the aspect ratio
-                if crop_to_fit:
-                    ImageProcessor.crop_to_fit(
-                    cover_file, target_dimensions)
+                # Transform the aspect ratio if needed
+                if Config.TYPE == "cover" and Config.CROP_TO_FIT:
+                    ImageProcessor.crop_to_fit(cover_file, config.dimensions)
 
-                print(f"Successfully processed img for: {game_slug}")
+                print(f"Successfully processed cover for: {game_slug}")
 
             except Exception as e:
                 logging.error(f"Failed to process {game_slug}: {str(e)}")

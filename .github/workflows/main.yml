@@ -27,6 +27,8 @@ jobs:
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
       - name: Upload release artifacts
         env:
           GITHUB_TOKEN: ${{ secrets.PAT }}
