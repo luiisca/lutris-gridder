@@ -1,15 +1,35 @@
-# A setup script to demonstrate the use of pillow
-#
-# Run the build process by running the command 'python setup.py build'
-#
-# If everything works well you should find a subdirectory in the build
-# subdirectory that contains the files needed to run the script without Python
+from cx_Freeze import setup, Executable
 
-from cx_Freeze import setup
+build_exe_options = {
+    "packages": [
+        "aiohttp",
+        "inquirer",
+        "PIL",
+        "requests",
+        "rich",
+        "rich_pixels",
+    ],
+    "includes": [
+        "PIL.Image",
+        "rich.console",
+        "rich.layout",
+        "rich.live",
+        "rich.panel",
+        "rich.text",
+        "asyncio",
+        "sqlite3",
+    ],
+}
 
 setup(
-    name="lutris_gridder",
+    name="lutris-gridder",
     version="1.1.0",
-    description="Download and transform cover art from SteamGridDB for your Lutris games library",
-    executables=["src/cover_downloader.py"],
+    description="Download and transform cover art from SteamGridDB for Lutris games",
+    options={"build_exe": build_exe_options},
+    executables=[
+        Executable(
+            script="src/cover_downloader.py", 
+            target_name="lutris-gridder",
+        )
+    ]
 )
