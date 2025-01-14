@@ -32,4 +32,4 @@ jobs:
       - name: Upload release artifacts
         env:
           GITHUB_TOKEN: ${{ secrets.PAT }}
-        run: gh release upload ${{ needs.release-please.outputs.tag_name }} src/cover_downloader.py
+        run: gh release upload ${{ needs.release-please.outputs.tag_name }} src/art_downloader.py
