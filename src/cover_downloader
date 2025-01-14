@@ -7,7 +7,7 @@ A tool to download and transform cover art from SteamGridDB for Lutris games.
 import sys
 import logging
 from dataclasses import dataclass
-from typing import Literal, Optional, List, Tuple
+from typing import Dict, Literal, Optional, List, Tuple
 import requests
 import sqlite3
 from PIL import Image
@@ -15,8 +15,15 @@ from pathlib import Path
 import json
 import inquirer
 import tempfile
-from rich.console import Console
+from rich.layout import Layout
+from rich.live import Live
+from rich.console import Console, Group
+from rich.text import Text
 from rich_pixels import Pixels
+from rich import box
+from rich.panel import Panel
+import asyncio
+import aiohttp
 
 # Configuration
 @dataclass
@@ -40,6 +47,176 @@ class Config:
 
 class ImageProcessor:
     """Handles all image processing operations."""
+
+    @staticmethod
+    async def download_image(session: aiohttp.ClientSession, url: str) -> Optional[bytes]:
+        """Asynchronously download an image."""
+        try:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    return await response.read()
+                return None
+        except Exception as e:
+            logging.error(f"Failed to download image: {str(e)}")
+            return None
+
+    @staticmethod
+    def create_horizontal_layout(images: Dict[int, Path], covers: List[dict]) -> Layout:
+        """Create a horizontal layout for images that adapts to content height."""
+        layout = Layout()
+        if Config.TYPE == 'banner':
+            # For banners, create a vertical stack without fixed ratios
+            panels = []
+            for idx, img_path in images.items():
+                try:
+                    pixels = Pixels.from_image_path(img_path)
+                    caption = Text.assemble(
+                        ("Selection: ", "bright_white"),
+                        (f"Option {idx + 1}\n", "bright_yellow"),
+                    )
+                    
+                    # Create individual panel for each image
+                    panel = Panel(
+                        Group(
+                            pixels,
+                            Text(""),  # Spacer
+                            caption
+                        ),
+                        box=box.ROUNDED,
+                        padding=(0, 1),
+                    )
+                    panels.append(panel)
+                except Exception as e:
+                    logging.error(f"Failed to create panel for image {idx}: {str(e)}")
+            
+            # Return a group of panels stacked vertically
+            return Group(*panels)
+        else:
+            layout.split_row(*[
+                Layout(name=str(idx))
+                for idx in range(len(images))
+            ])
+            for idx, img_path in images.items():
+                try:
+                    pixels = Pixels.from_image_path(img_path)
+                    caption = Text.assemble(
+                        ("Selection: ", "bright_white"),
+                        (f"Option {idx + 1}\n", "bright_yellow"),
+                    )
+                    
+                    # Combine image and caption in a panel
+                    cell_content = Group(
+                        pixels,
+                        Text(""),  # Spacer
+                        caption
+                    )
+                    layout[str(idx)].update(
+                        Panel(
+                            cell_content,
+                            box=box.ROUNDED,
+                            padding=(0, 1),
+                        )
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to create layout: {str(e)}")
+        
+            return layout
+
+
+    @staticmethod
+    def get_new_size(img: Image.Image) -> Tuple[int, int]:
+        """Calculate appropriate dimensions for terminal display."""
+        console = Console()
+        terminal_width = console.width
+        preview_height = min(50, console.height - 5)
+        
+        # Calculate new dimensions preserving aspect ratio
+        aspect_ratio = img.width / img.height
+        new_width = min(terminal_width, img.width)
+        new_height = int(new_width / aspect_ratio)
+        
+        # If height is too tall, scale down based on height
+        if new_height > preview_height:
+            new_height = preview_height
+            new_width = int(new_height * aspect_ratio)
+            
+        return new_width, new_height
+
+    @staticmethod
+    def process_cover_image(img_path: Path) -> None:
+        """Process a single cover image for display."""
+        with Image.open(img_path) as img:
+            if Config.TYPE == 'banner' or not Config.CROP_TO_FIT:
+                img = img.convert('RGB')
+            
+            # Get appropriate dimensions
+            new_width, new_height = ImageProcessor.get_new_size(img)
+            
+            # Resize image
+            resized_img = img.resize((new_width, new_height))
+            
+            # Save resized image
+            resized_img.save(img_path)
+
+    @staticmethod
+    async def cover_selection(covers: List[dict], game_name: str) -> Optional[str]:
+        """Prompt user to select from available covers with parallel loading."""
+        if not covers:
+            return None
+
+        print(f"\nLoading covers for {game_name}...")
+        
+        choices = [(f"Option {i + 1} {cover['url']}", cover['url']) 
+                  for i, cover in enumerate(covers[:5])]
+        choices.append(("Skip this game", None))
+        
+        console = Console()
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            images: Dict[int, Path] = {}
+            
+            async with aiohttp.ClientSession() as session:
+                download_tasks = []
+                for i, cover in enumerate(covers[:5]):
+                    task = asyncio.create_task(
+                        ImageProcessor.download_image(session, cover['url'])
+                    )
+                    download_tasks.append((i, task))
+
+                layout = Layout()
+                console.height = console.height - 20
+
+                with Live(layout, refresh_per_second=4, console=console, auto_refresh=False) as live:
+                    for i, task in download_tasks:
+                        try:
+                            image_data = await task
+                            if image_data:
+                                img_path = temp_dir_path / f"image_{i}.jpg"
+                                img_path.write_bytes(image_data)
+                                
+                                if Config.TYPE == 'cover' and Config.CROP_TO_FIT:
+                                    ImageProcessor.crop_to_fit(img_path)
+                                
+                                # Process image for display
+                                ImageProcessor.process_cover_image(img_path)
+                                
+                                images[i] = img_path
+                                
+                                # Update layout with new image
+                                live.update(ImageProcessor.create_horizontal_layout(images, covers), refresh=True)
+                        except Exception as e:
+                            logging.error(f"Failed to process image {i}: {str(e)}")
+            
+            questions = [
+                inquirer.List('cover',
+                             message="Select cover art:",
+                             choices=[choice[0] for choice in choices],
+                             ),
+            ]
+            
+            answer = inquirer.prompt(questions)["cover"]
+            return dict(choices)[answer]
 
     @staticmethod
     def crop_to_fit(image_path: Path, target_dimensions: Tuple[int, int] = (675, 900)) -> None:
@@ -294,37 +471,6 @@ class Prompter:
         else:
             Config.REPLACE_ALL = False
 
-    @staticmethod
-    def cover_selection(covers: List[dict], game_name: str) -> Optional[str]:
-        """Prompt user to select from available covers."""
-        if not covers:
-            return None
-
-        print(f"\nAvailable covers for {game_name}:")
-        choices = []
-        
-        console = Console()
-        
-        for i, cover in enumerate(covers):
-            if i >= 5:
-                break
-            console.print(f"\n[bold cyan]Option {i + 1}:[/bold cyan]")
-            ImageProcessor.display_terminal_preview(cover['url'])
-            print(f"URL: {cover['url']}")
-            choices.append((f"Option {i + 1}", cover['url']))
-        
-        choices.append(("Skip this game", None))
-        
-        questions = [
-            inquirer.List('cover',
-                         message="Select cover art:",
-                         choices=[choice[0] for choice in choices],
-                         ),
-        ]
-        
-        answer = inquirer.prompt(questions)["cover"]
-        return dict(choices)[answer]
-
 
 class CoverArtDownloader:
     """Main application class for downloading and processing cover art."""
@@ -378,7 +524,7 @@ class CoverArtDownloader:
             print(f"Error validating API key: {str(e)}")
             sys.exit(1)
 
-    def process_games(self):
+    async def process_games(self):
         """Main method to process all games and download/transform cover art."""
         Prompter.cover_type()
         if Config.TYPE == "cover":
@@ -413,7 +559,7 @@ class CoverArtDownloader:
             try:
                 cover_url = None
                 if Config.MODE == "manual":
-                    cover_url = Prompter.cover_selection(covers, game_name)
+                    cover_url = await ImageProcessor.cover_selection(covers, game_name)
                     if not cover_url:
                         print(f"Skipping {game_name}")
                         continue
@@ -448,7 +594,8 @@ def main():
         if not downloader.config.get('api_key'):
             downloader.setup_api_key()
 
-        downloader.process_games()
+        # Run the async process_games
+        asyncio.run(downloader.process_games())
 
         print("\nAll done! Restart Lutris for the changes to take effect.")
 

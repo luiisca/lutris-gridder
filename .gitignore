@@ -9,6 +9,7 @@ dist/
 build/
 *.egg-info/
 .env
+my-venv
 EOF
 src/learning.py
 src/imgs
