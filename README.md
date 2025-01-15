@@ -31,7 +31,7 @@ Simple script to download and crop Steam Grid art for your Lutris library.
     - Auto or Manual selection mode
     - Replace all existing images or download new ones only
 
-6. Restart Lutris to see the changes.
+6. **Note**: After making changes, you must fully terminate the application (e.g., using a task manager like htop) and restart Lutris to see the updates take effect.
 
 ## Features
 
